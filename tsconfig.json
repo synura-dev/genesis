@@ -1,0 +1,29 @@
+{
+	"compilerOptions": {
+		"lib": ["ESNext", "DOM"], // Thêm DOM nếu có làm việc với Browser
+		"target": "ESNext",
+		"module": "Preserve",
+		"moduleDetection": "force",
+		"allowJs": true,
+
+		"moduleResolution": "bundler",
+		"allowImportingTsExtensions": true,
+		"verbatimModuleSyntax": true,
+
+		// Đổi cái này để tsup có thể tạo file .d.ts mượt mà
+		"noEmit": false,
+		"declaration": true,
+		"emitDeclarationOnly": true,
+		"declarationMap": true, // Giúp người dùng click vào hàm hiện ra code gốc
+
+		"strict": true,
+		"skipLibCheck": true,
+		"noFallthroughCasesInSwitch": true,
+		"noUncheckedIndexedAccess": true,
+		"noImplicitOverride": true,
+
+		"isolatedModules": true // Bắt buộc nếu dùng esbuild/tsup
+	},
+	"include": ["src"],
+	"exclude": ["node_modules", "dist"]
+}
