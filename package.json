@@ -26,6 +26,13 @@
     "lint": "biome check .",
     "format": "biome check --write ."
   },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/synura-dev/genesis.git"
+  },
   "devDependencies": {
     "@biomejs/biome": "2.4.8",
     "@types/bun": "latest",
