@@ -1,5 +1,5 @@
 {
-  "name": "@synura-dev/genesis",
+  "name": "@synura/genesis",
   "version": "0.0.2",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -16,7 +16,8 @@
   },
   "files": [
     "dist",
-    "src"
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsup",
@@ -27,11 +28,8 @@
     "format": "biome check --write ."
   },
   "publishConfig": {
-    "registry": "https://npm.pkg.github.com"
-  },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/synura-dev/genesis.git"
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
   },
   "devDependencies": {
     "@biomejs/biome": "2.4.8",
