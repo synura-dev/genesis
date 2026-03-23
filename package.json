@@ -1,5 +1,5 @@
 {
-  "name": "@synura/genesis",
+  "name": "@synura-dev/genesis",
   "version": "0.0.2",
   "type": "module",
   "main": "./dist/index.cjs",
