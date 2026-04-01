@@ -1,59 +1,67 @@
-/** biome-ignore-all lint/style/noNonNullAssertion: Using internal state */
+/** biome-ignore-all lint/style/noNonNullAssertion: Using non-null assertions for performance */
 import { EventEmitter } from "eventemitter3";
-import {
-	type GAction,
-	type GActionBase,
-	type GContext,
-	type GContextBase,
-	type GEmpty,
-	type GEventContext,
-	type GHandler,
-	GHealth,
-	type GIdentity,
-	type GMerge,
-	type GMetadata,
-	type GPulse,
-	type GRegistry,
-	type GState,
-	type Prettify,
-	type TargetProxy,
-} from "./types";
+import { GFluent } from "./fluent";
+import { GLogic } from "./logic";
+import { G, type GIdentity, INTERNAL, INTERNAL_STORE } from "./types";
 
 /**
  * Genesis: The Monolithic Engine
  * ⚡ 3.0M+ RPS (TypedArray Metrics) | ⚡ ZERO GC HOT-PATH | ⚡ ZERO ANY
  */
-export class Genesis<T extends GRegistry = GEmpty> {
-	public readonly identity: GIdentity;
-	protected readonly _state: GState;
-
-	constructor(name: GIdentity = "root", state?: GState) {
-		this.identity = name;
-		this._state = state ?? {
-			servicesMap: new Map(),
-			internalMap: new Map(),
-			privateMap: new Map(),
-			decorationsMap: new Map(),
-			storeMap: new Map(),
-			healthMap: new Map(),
-			metricsBuffer: new Float64Array(4096),
-			metricsIndexMap: new Map(),
-			metricsNextIndex: 0,
-			dispatchAtlas: Object.create(null),
-			contextCache: new Map(),
-			contextPrototype: {},
-			eventEmitter: new EventEmitter(),
-			eventNames: new Set(),
-			interceptors: [],
-			hooks: { install: [], ready: [], start: [], stop: [] },
-			extensions: [],
-			children: [],
-			parents: [],
+export class Genesis<
+	T extends G.Atlas = G.Empty,
+	Id extends string = string,
+> extends GFluent<T, G.State> {
+	public readonly identity: Id;
+	protected readonly _logic: GLogic;
+	public get [INTERNAL](): G.Bridge {
+		return {
+			state: this._state,
+			graft: (id: string | symbol, h: Record<string, G.Handler>) =>
+				this._graft(id, h),
+			rebuildPrototype: () => this._rebuildPrototype(),
+			relay: (
+				e: string,
+				d: { sender: string; event: string; payload: unknown },
+			) => this._relay(e, d),
+			trigger: (h, n) => this._trigger(h, n),
 		};
 	}
 
-	private _evolve<NewT extends GRegistry>(): Genesis<NewT> {
-		return new Genesis<NewT>(this.identity, this._state);
+	constructor(name: Id, state?: G.State, logic?: GLogic) {
+		super(
+			state ?? {
+				servicesMap: new Map(),
+				internalMap: new Map(),
+				privateMap: new Map(),
+				decorationsMap: new Map(),
+				storeMap: new Map(),
+				healthMap: new Map(),
+				metricsBuffer: new Float64Array(4096),
+				metricsIndexMap: new Map(),
+				metricsNextIndex: 0,
+				dispatchAtlas: Object.create(null),
+				contextCache: new Map(),
+				contextPrototype: {},
+				eventEmitter: new EventEmitter(),
+				eventNames: new Set(),
+				interceptors: [],
+				hooks: { install: [], ready: [], start: [], stop: [] },
+				extensions: [],
+				children: [],
+				parents: [],
+			},
+		);
+
+		this.identity = name;
+		this._logic = logic ?? new GLogic();
+		this._rebuildPrototype();
+	}
+
+	protected override _evolve<NewT extends G.Atlas>(
+		nextState: G.State,
+	): Genesis<NewT, Id> {
+		return new Genesis<NewT, Id>(this.identity, nextState, this._logic);
 	}
 
 	private _getMetricsIndex(id: string): number {
@@ -75,134 +83,287 @@ export class Genesis<T extends GRegistry = GEmpty> {
 		return idx;
 	}
 
-	protected _graft(id: string, h: Record<string, GHandler>) {
+	public _graft(id: string | symbol, h: Record<string, G.Handler>) {
 		this._state.dispatchAtlas[id] = Object.assign(
 			this._state.dispatchAtlas[id] ?? Object.create(null),
 			h,
 		);
 		for (const parent of this._state.parents) {
-			(parent as Genesis<GRegistry>)._graft(id, h);
+			parent[INTERNAL].graft(id, h);
 		}
 	}
 
+	/**
+	 * Registry: Central provider for Genesis registration.
+	 * Redirects to GLogic for execution and handles rebuilding the context prototype.
+	 */
+	private _register<K extends keyof G.RegistrationSchema, NewT extends G.Atlas>(
+		type: K,
+		payload: G.RegistrationSchema[K],
+	): Genesis<NewT, Id> {
+		const entry = { type, payload } as G.RegistrationEntry;
+		this._logic.registry(this.identity, this._state, entry, (id, h) =>
+			this._graft(id, h),
+		);
+		this._rebuildPrototype();
+		return this._evolve<NewT>(this._state);
+	}
+
 	public expose<
-		S extends Record<string, (ctx: GContext<T>, ...args: unknown[]) => unknown>,
-	>(instance: S): Genesis<Prettify<T & { services: { [K in GIdentity]: S } }>> {
-		const h = instance as unknown as Record<string, GHandler>;
-		this._state.servicesMap.set(this.identity, h);
-		this._graft(this.identity, h);
-		return this._evolve<Prettify<T & { services: { [K in GIdentity]: S } }>>();
+		S extends Record<
+			string,
+			// biome-ignore lint/suspicious/noExplicitAny: Allow any parameters in service definition
+			(ctx: G.Context<T>, ...args: any[]) => unknown | Promise<unknown>
+		>,
+	>(instance: S): Genesis<G.Combine<T, { services: { [K in Id]: S } }>, Id> {
+		return this._register(
+			"services",
+			instance as unknown as Record<string, G.Handler>,
+		);
 	}
 
 	public internal<
-		S extends Record<string, (ctx: GContext<T>, ...args: unknown[]) => unknown>,
-	>(instance: S): Genesis<Prettify<T & { internal: { [K in GIdentity]: S } }>> {
-		const h = instance as unknown as Record<string, GHandler>;
-		this._state.internalMap.set(this.identity, h);
-		this._graft(this.identity, h);
-		return this._evolve<Prettify<T & { internal: { [K in GIdentity]: S } }>>();
+		S extends Record<
+			string,
+			// biome-ignore lint/suspicious/noExplicitAny: Allow any parameters in internal service definition
+			(ctx: G.Context<T>, ...args: any[]) => unknown | Promise<unknown>
+		>,
+	>(instance: S): Genesis<G.Combine<T, { internal: { [K in Id]: S } }>, Id> {
+		return this._register(
+			"internal",
+			instance as unknown as Record<string, G.Handler>,
+		);
 	}
 
 	public isolate<
-		S extends Record<string, (ctx: GContext<T>, ...args: unknown[]) => unknown>,
-	>(instance: S): Genesis<T> {
-		const h = instance as unknown as Record<string, GHandler>;
-		this._state.privateMap.set(this.identity, h);
-		this._graft(this.identity, h);
-		return this._evolve<T>();
+		S extends Record<
+			string,
+			// biome-ignore lint/suspicious/noExplicitAny: Allow any parameters in private service definition
+			(ctx: G.Context<T>, ...args: any[]) => unknown | Promise<unknown>
+		>,
+	>(instance: S): Genesis<G.Combine<T, { internal: { [K in Id]: S } }>, Id> {
+		return this._register(
+			"private",
+			instance as unknown as Record<string, G.Handler>,
+		);
 	}
 
 	public events<E extends Record<string, unknown>>(
 		names?: (keyof E)[],
-	): Genesis<T & { events: E }> {
-		if (names) {
-			for (const name of names) this._state.eventNames.add(String(name));
-		}
-		return this._evolve<T & { events: E }>();
+	): Genesis<G.Combine<T, { events: E }>, Id>;
+	public events<const E extends string[]>(
+		...names: E
+	): Genesis<G.Combine<T, { events: { [K in E[number]]: unknown } }>, Id>;
+	public events<NewT extends G.Atlas>(
+		namesOrFirst?: unknown,
+		...rest: unknown[]
+	): Genesis<NewT, Id> {
+		const names = (
+			Array.isArray(namesOrFirst)
+				? namesOrFirst
+				: typeof namesOrFirst === "string"
+					? [namesOrFirst, ...rest]
+					: []
+		) as string[];
+
+		return this._register<"events", NewT>("events", names);
 	}
 
 	public decorate<K extends string, V>(
 		key: K,
 		value: V,
-	): Genesis<Prettify<T & { decorations: { [P in K]: V } }>> {
-		this._state.decorationsMap.set(key, value);
-		this._rebuildPrototype();
-		return this._evolve<Prettify<T & { decorations: { [P in K]: V } }>>();
+	): Genesis<G.Combine<T, { decorations: { [P in K]: V } }>, Id> {
+		return this._register("decorations", { key, value });
 	}
 
+	public state<S extends Record<string, unknown>>(
+		obj: S,
+	): Genesis<G.Combine<T, { store: S }>, Id>;
 	public state<K extends string, V>(
 		key: K,
 		value: V,
-	): Genesis<Prettify<T & { store: { [P in K]: V } }>> {
-		this._state.storeMap.set(key, value);
-		this._rebuildPrototype();
-		return this._evolve<Prettify<T & { store: { [P in K]: V } }>>();
+	): Genesis<G.Combine<T, { store: { [P in K]: V } }>, Id>;
+	public state<NewT extends G.Atlas>(
+		keyOrObj: string | Record<string, unknown>,
+		value?: unknown,
+	): Genesis<NewT, Id> {
+		const payload: G.RegistrationSchema["state"] = { keyOrObj, value };
+		return this._register<"state", NewT>("state", payload);
 	}
 
 	private _rebuildPrototype() {
-		const proto = this._state.contextPrototype as Record<string, unknown>;
-		for (const [k, v] of this._state.decorationsMap) proto[k] = v;
+		const proto = this._state.contextPrototype;
+		const state = this._state;
+
+		// ⚡ DECORATIONS: Native pre-bind
+		for (const [k, v] of state.decorationsMap)
+			(proto as Record<string, unknown>)[k] = v;
+
+		// ⚡ STORE-HUB: Chained access without Proxy
 		if (!Object.getOwnPropertyDescriptor(proto, "store")) {
 			Object.defineProperty(proto, "store", {
-				get: () => Object.fromEntries(this._state.storeMap.entries()),
+				get: function (this: G.Context<T>) {
+					let store = this.g._state.dispatchAtlas[INTERNAL_STORE];
+					if (!store) {
+						store = Object.create(null);
+						this.g._state.dispatchAtlas[INTERNAL_STORE] = store;
+					}
+					return store;
+				},
 				enumerable: true,
 				configurable: true,
 			});
 		}
 	}
 
-	public async heal(): Promise<void> {
-		this._state.healthMap.set(this.identity, GHealth.Healthy);
-		this._getMetricsIndex(this.identity);
-
-		const context = Object.create(
-			this._state.contextPrototype as object,
-		) as Record<string, unknown>;
+	private _createContext(): G.Context<G.Atlas> {
+		const context = Object.create(this._state.contextPrototype) as Record<
+			string,
+			unknown
+		>;
 		context.g = this;
 		context.identity = this.identity;
-		const run = async (
-			list: ((ctx: GContextBase) => void | Promise<void>)[],
-		) => {
-			await Promise.all(
-				list.map((fn) => fn(context as unknown as GContextBase)),
-			);
-		};
-		await run(this._state.hooks.install);
-		await run(this._state.hooks.ready);
-		await run(this._state.hooks.start);
+		return context as unknown as G.Context<G.Atlas>;
 	}
 
-	public use<U extends GRegistry>(child: Genesis<U>): Genesis<GMerge<T, U>> {
+	private async _trigger<U extends G.Atlas>(
+		hooks: G.HookFn<U>[],
+		name: "install" | "ready" | "start" | "stop" | "extension",
+	) {
+		const context = this._createContext();
+
+		try {
+			const interceptors = this._state.interceptors;
+			if (interceptors.length > 0) {
+				for (let i = 0; i < interceptors.length; i++) {
+					const r = (interceptors[i] as G.InterceptorFn<G.Atlas>)({
+						type: "hook",
+						name,
+						target: this.identity,
+						sender: this.identity,
+					});
+					if (r instanceof Promise) await r;
+				}
+			}
+
+			for (let i = 0; i < hooks.length; i++) {
+				const hook = hooks[i];
+				if (hook)
+					await (hook as G.HookFn<G.Atlas>)(context as G.Context<G.Atlas>);
+			}
+		} catch (error) {
+			const interceptors = this._state.interceptors;
+			if (interceptors.length > 0) {
+				for (let i = 0; i < interceptors.length; i++) {
+					const r = (interceptors[i] as G.InterceptorFn<G.Atlas>)({
+						type: "hook",
+						name,
+						target: this.identity,
+						sender: this.identity,
+						error,
+					});
+					if (r instanceof Promise) await r.catch(() => {});
+				}
+			}
+			throw error;
+		}
+	}
+
+	public async heal(): Promise<void> {
+		this._state.healthMap.set(this.identity, G.Health.Healthy);
+		this._getMetricsIndex(this.identity);
+		const h = this._state.hooks;
+		await this._trigger(h.install, "install");
+		await this._trigger(h.ready, "ready");
+		await this._trigger(h.start, "start");
+	}
+
+	public use<U extends G.Atlas>(
+		child: Genesis<U>,
+		state?: Partial<U["store"]>,
+	): Genesis<G.Combine<T, U>, Id> {
 		if (this._state.children.some((c) => c.identity === child.identity))
-			return this._evolve<GMerge<T, U>>();
+			return this._evolve<G.Combine<T, U>>(this._state);
 
-		const cState = (child as Genesis<GRegistry>)._state;
-		cState.parents.push(this as Genesis<GRegistry>);
+		const s = this._state;
+		const cState = child[INTERNAL].state;
+		cState.parents.push(this as Genesis<G.Atlas, string>);
 
-		for (const [k, v] of cState.servicesMap) this._state.servicesMap.set(k, v);
-		for (const [k, v] of cState.internalMap) this._state.internalMap.set(k, v);
-		for (const [k, v] of cState.privateMap) this._state.privateMap.set(k, v);
-		for (const [k, v] of cState.decorationsMap)
-			this._state.decorationsMap.set(k, v);
-		for (const [k, v] of cState.storeMap) this._state.storeMap.set(k, v);
+		// ⚡ GRAFT: Migrate existing child data to backbone BEFORE sharing
+		for (const id of Reflect.ownKeys(cState.dispatchAtlas)) {
+			const h = cState.dispatchAtlas[id];
+			if (h) this._graft(id, h as Record<string, G.Handler>);
+		}
+		for (const [k, v] of cState.storeMap.entries()) s.storeMap.set(k, v);
+		for (const [k, v] of cState.decorationsMap.entries())
+			s.decorationsMap.set(k, v);
+		for (const [k, v] of cState.servicesMap.entries()) s.servicesMap.set(k, v);
+		for (const [k, v] of cState.internalMap.entries()) s.internalMap.set(k, v);
+		for (const [k, v] of cState.privateMap.entries()) s.privateMap.set(k, v);
 
-		for (const [id, h] of Object.entries(this._state.dispatchAtlas))
-			this._graft(id, h);
-		for (const [id, h] of Object.entries(cState.dispatchAtlas))
-			this._graft(id, h);
+		if (state) {
+			for (const [k, v] of Object.entries(state)) s.storeMap.set(k, v);
+		}
 
-		this._rebuildPrototype();
-		this._state.children.push(child as Genesis<GRegistry>);
-		return this._evolve<GMerge<T, U>>();
+		// ⚡ INTERNAL BACKBONE: Pure Reference Hubbing
+		const childState = cState as G.State;
+		Object.assign(childState, {
+			servicesMap: s.servicesMap,
+			internalMap: s.internalMap,
+			privateMap: s.privateMap,
+			storeMap: s.storeMap,
+			decorationsMap: s.decorationsMap,
+			metricsBuffer: s.metricsBuffer,
+			metricsIndexMap: s.metricsIndexMap,
+			eventEmitter: s.eventEmitter,
+			dispatchAtlas: s.dispatchAtlas,
+			contextCache: s.contextCache,
+			interceptors: s.interceptors,
+			contextPrototype: s.contextPrototype,
+		});
+
+		this._state.children.push(child as unknown as Genesis<G.Atlas, string>);
+		return this._evolve<G.Combine<T, U>>(this._state);
 	}
 
-	public unuse(child: Genesis<GRegistry>): Genesis<T> {
+	public with(
+		state: Partial<T["store"]> & Record<string, unknown>,
+	): Genesis<T, Id> {
+		const nextAtlas = { ...this._state.dispatchAtlas };
+		const currentStore = nextAtlas[INTERNAL_STORE] as
+			| Record<string, unknown>
+			| undefined;
+		const nextStore = { ...currentStore };
+		nextAtlas[INTERNAL_STORE] = nextStore as unknown as Record<
+			string,
+			G.Handler
+		>;
+
+		const nextState: G.State = {
+			...this._state,
+			dispatchAtlas: nextAtlas,
+			storeMap: new Map(this._state.storeMap),
+			contextCache: new Map(),
+		};
+
+		for (const [k, v] of Object.entries(state)) {
+			nextState.storeMap.set(k, v);
+			nextStore[k] = v;
+		}
+
+		return this._evolve<T>(nextState);
+	}
+
+	public unuse(child: Genesis<G.Atlas, string>): Genesis<T, Id> {
 		const index = this._state.children.indexOf(child);
-		if (index === -1) return this._evolve<T>();
+		if (index === -1) return this._evolve<T>(this._state);
 		this._state.children.splice(index, 1);
 
-		const cState = (child as Genesis<GRegistry>)._state;
-		const pIndex = cState.parents.indexOf(this as Genesis<GRegistry>);
+		const cBridge = child[INTERNAL];
+		const cState = cBridge.state;
+		const pIndex = cState.parents.indexOf(
+			this as unknown as Genesis<G.Atlas, string>,
+		);
 		if (pIndex !== -1) cState.parents.splice(pIndex, 1);
 
 		const cleanup = (id: string) => {
@@ -220,106 +381,130 @@ export class Genesis<T extends GRegistry = GEmpty> {
 		};
 
 		cleanup(child.identity);
-		for (const sub of (child as Genesis<GRegistry>)._state.children)
-			cleanup(sub.identity);
+		for (const sub of cBridge.state.children) cleanup(sub.identity);
 
-		return this._evolve<T>();
+		return this._evolve<T>(this._state);
 	}
 
-	public mount(fn: (ctx: GContext<T>) => void | Promise<void>): Genesis<T> {
-		this._state.extensions.push(
-			fn as unknown as (ctx: GContextBase) => void | Promise<void>,
-		);
-		return this._evolve<T>();
+	public mount(
+		fn: (ctx: G.Context<T>) => void | Promise<void>,
+	): Genesis<T, Id> {
+		this._state.extensions.push(fn as G.ExtensionFn<G.Atlas>);
+		return this._evolve<T>(this._state);
 	}
 
-	public install(fn: (ctx: GContext<T>) => void | Promise<void>): Genesis<T> {
-		this._state.hooks.install.push(
-			fn as unknown as (ctx: GContextBase) => void | Promise<void>,
-		);
-		return this._evolve<T>();
+	public install(
+		fn: (ctx: G.Context<T>) => void | Promise<void>,
+	): Genesis<T, Id> {
+		this._state.hooks.install.push(fn as G.HookFn<G.Atlas>);
+		return this._evolve<T>(this._state);
 	}
 
-	public start(fn: (ctx: GContext<T>) => void | Promise<void>): Genesis<T> {
-		this._state.hooks.start.push(
-			fn as unknown as (ctx: GContextBase) => void | Promise<void>,
-		);
-		return this._evolve<T>();
+	public start(
+		fn: (ctx: G.Context<T>) => void | Promise<void>,
+	): Genesis<T, Id> {
+		this._state.hooks.start.push(fn as G.HookFn<G.Atlas>);
+		return this._evolve<T>(this._state);
 	}
 
-	public ready(fn: (ctx: GContext<T>) => void | Promise<void>): Genesis<T> {
-		this._state.hooks.ready.push(
-			fn as unknown as (ctx: GContextBase) => void | Promise<void>,
-		);
-		return this._evolve<T>();
+	public ready(
+		fn: (ctx: G.Context<T>) => void | Promise<void>,
+	): Genesis<T, Id> {
+		this._state.hooks.ready.push(fn as G.HookFn<G.Atlas>);
+		return this._evolve<T>(this._state);
 	}
 
-	public stop(fn: (ctx: GContext<T>) => void | Promise<void>): Genesis<T> {
-		this._state.hooks.stop.push(
-			fn as unknown as (ctx: GContextBase) => void | Promise<void>,
-		);
-		return this._evolve<T>();
+	public stop(fn: (ctx: G.Context<T>) => void | Promise<void>): Genesis<T, Id> {
+		this._state.hooks.stop.push(fn as G.HookFn<G.Atlas>);
+		return this._evolve<T>(this._state);
 	}
 
 	public intercept(
-		fn: (action: GAction<T>) => void | Promise<void>,
-	): Genesis<T> {
-		this._state.interceptors.push(
-			fn as unknown as (action: GActionBase) => void | Promise<void>,
-		);
-		return this._evolve<T>();
+		fn: (action: G.Action<T>) => void | Promise<void>,
+	): Genesis<T, Id> {
+		this._state.interceptors.push(fn as G.InterceptorFn<G.Atlas>);
+		return this._evolve<T>(this._state);
 	}
 
-	public info(options?: { recursive?: boolean }): GMetadata {
+	public info(options?: { recursive?: boolean; _v?: Set<string> }): G.Metadata {
 		const id = this.identity;
-		const idx = this._state.metricsIndexMap.get(id);
-		const health = this._state.healthMap.get(id) || GHealth.Healthy;
-		let pulse: GPulse | undefined;
+		const v = options?._v ?? new Set<string>();
+		const isRef = v.has(id);
+		v.add(id);
 
+		const s = this._state;
+		const health = s.healthMap.get(id) || G.Health.Healthy;
+
+		if (isRef) {
+			return {
+				identity: id,
+				health,
+				isRef: true,
+			};
+		}
+
+		const idx = s.metricsIndexMap.get(id);
+
+		const children =
+			options?.recursive !== false
+				? s.children.map((child) => child.info({ ...options, _v: v }))
+				: [];
+
+		let pulse: G.Pulse | undefined;
 		if (idx !== undefined) {
-			const b = this._state.metricsBuffer;
-			const totalRequests = b[idx + 0] || 0;
-			const totalErrors = b[idx + 1] || 0;
-			const totalLatency = b[idx + 2] || 0;
-			const lastReset = b[idx + 3] || Date.now();
-			const elapsedSeconds = (Date.now() - lastReset) / 1000;
+			const b = s.metricsBuffer;
+			let req = b[idx + 0] || 0;
+			let err = b[idx + 1] || 0;
+			let lat = b[idx + 2] || 0;
+			const last = b[idx + 3] || Date.now();
+
+			// ⚡ AGGREGATION
+			for (let i = 0; i < children.length; i++) {
+				const cp = children[i]?.pulse;
+				if (cp) {
+					req += cp.totalRequests;
+					err += cp.totalErrors;
+					lat += cp.latency * cp.totalRequests;
+				}
+			}
+
+			const sec = (Date.now() - last) / 1000 || 1;
 			pulse = {
 				status: health,
-				latency: totalLatency / (totalRequests || 1),
-				rps: totalRequests / (elapsedSeconds || 1),
-				errorRate: totalErrors / (totalRequests || 1),
-				totalRequests,
-				totalErrors,
+				latency: lat / (req || 1),
+				rps: req / sec,
+				errorRate: err / (req || 1),
+				totalRequests: req,
+				totalErrors: err,
 			};
 		}
 
 		return {
-			identity: this.identity,
+			identity: id,
 			health: health,
 			pulse,
 			services: {
-				public: Object.keys(this._state.servicesMap.get(this.identity) ?? {}),
-				internal: Object.keys(this._state.internalMap.get(this.identity) ?? {}),
-				private: Object.keys(this._state.privateMap.get(this.identity) ?? {}),
+				public: Object.keys(s.servicesMap.get(id) ?? {}),
+				internal: Object.keys(s.internalMap.get(id) ?? {}),
+				private: Object.keys(s.privateMap.get(id) ?? {}),
 			},
-			events: Array.from(this._state.eventNames),
-			children:
-				options?.recursive !== false
-					? this._state.children.map((child) => child.info(options))
-					: [],
+			events: Array.from(s.eventNames),
+			children,
 		};
 	}
 
-	public broadcast<K extends keyof T["events"]>(
+	public async broadcast<
+		K extends Extract<keyof T["events"], string> | (string & {}),
+	>(
 		event: K,
-		payload: T["events"][K],
-	): Genesis<T> {
-		this._relay(event as string, {
+		payload: K extends keyof T["events"] ? T["events"][K] : unknown,
+	): Promise<Genesis<T, Id>> {
+		await this._relay(event as string, {
 			sender: this.identity,
 			event: event as string,
 			payload,
 		});
-		return this._evolve<T>();
+		return this._evolve<T>(this._state);
 	}
 
 	private async _relay(
@@ -328,181 +513,220 @@ export class Genesis<T extends GRegistry = GEmpty> {
 	) {
 		const start = performance.now();
 		const idx = this._getMetricsIndex(data.sender);
+		const itpc = this._state.interceptors;
 		try {
-			for (const interceptor of this._state.interceptors)
-				await interceptor({
+			if (itpc.length > 0) {
+				const action: G.Action<G.Atlas> = {
 					type: "broadcast",
 					event,
 					payload: data.payload,
 					sender: data.sender,
-				});
+				};
+				for (let i = 0; i < itpc.length; i++) {
+					const r = itpc[i]!(action);
+					if (r instanceof Promise) await r;
+				}
+			}
+
 			this._state.eventEmitter.emit(event, data);
-			await Promise.all(
-				this._state.children.map((child) =>
-					(
-						child as unknown as {
-							_relay: (e: string, d: Record<string, unknown>) => Promise<void>;
-						}
-					)._relay(event, data),
-				),
-			);
+
 			const b = this._state.metricsBuffer;
 			b[idx + 0]!++;
 			b[idx + 2]! += performance.now() - start;
 		} catch (error) {
 			this._state.metricsBuffer[idx + 1]!++;
+			if (itpc.length > 0) {
+				const action: G.Action<G.Atlas> = {
+					type: "broadcast",
+					event,
+					payload: data.payload,
+					sender: data.sender,
+					error,
+				};
+				for (let i = 0; i < itpc.length; i++) {
+					const r = itpc[i]!(action);
+					if (r instanceof Promise) await r.catch(() => {});
+				}
+			}
 			throw error;
 		}
 	}
 
-	public subscribe<K extends keyof T["events"]>(
+	public subscribe<
+		K extends Extract<keyof T["events"], string> | (string & {}),
+	>(
 		event: K,
-		handler: (ctx: GEventContext<T["events"][K]>) => void,
+		handler: (ctx: {
+			sender: GIdentity;
+			event: string;
+			payload: K extends keyof T["events"] ? T["events"][K] : unknown;
+		}) => void,
 	): () => void {
-		const pipe = (data: GEventContext<unknown>) =>
-			handler(data as GEventContext<T["events"][K]>);
+		const pipe = (data: {
+			sender: GIdentity;
+			event: string;
+			payload: unknown;
+		}) =>
+			handler(
+				data as {
+					sender: GIdentity;
+					event: string;
+					payload: K extends keyof T["events"] ? T["events"][K] : unknown;
+				},
+			);
 		this._state.eventEmitter.on(event as string, pipe);
 		return () => this._state.eventEmitter.off(event as string, pipe);
 	}
 
 	public async request<
-		K extends keyof T["services"] | keyof T["internal"],
-		S2 = K extends keyof T["services"]
-			? T["services"][K]
-			: K extends keyof T["internal"]
-				? T["internal"][K]
-				: never,
-		M extends keyof S2 = keyof S2,
-		P = S2[M] extends (...args: infer Args) => unknown ? Args : never[],
-		R = S2[M] extends (...args: unknown[]) => Promise<infer Res>
-			? Res
-			: S2[M] extends (...args: unknown[]) => infer Res
-				? Res
-				: unknown,
-	>(to: K, method: M, ...args: P extends unknown[] ? P : never[]): Promise<R> {
-		const id = String(to);
-		const mName = String(method);
-
-		const handler = this._state.dispatchAtlas[id]?.[mName];
-		if (handler) {
-			let context = this._state.contextCache.get(this.identity);
-			if (!context) {
-				const fresh = Object.create(
-					this._state.contextPrototype as object,
-				) as Record<string, unknown>;
-				fresh.g = this;
-				fresh.identity = this.identity;
-				context = fresh as unknown as GContextBase;
-				this._state.contextCache.set(this.identity, context);
-			}
-
-			const start = performance.now();
-			const idx = this._getMetricsIndex(id);
-			try {
-				const result = await handler(context, ...args);
-				const b = this._state.metricsBuffer;
-				b[idx + 0]!++;
-				b[idx + 2]! += performance.now() - start;
-				return result as R;
-			} catch (error) {
-				this._state.metricsBuffer[idx + 1]!++;
-				throw error;
-			}
-		}
-
-		for (const interceptor of this._state.interceptors)
-			await interceptor({
+		K extends
+			| Extract<keyof T["services"] | keyof T["internal"], string>
+			| (string & {}),
+		S2 = G.Discover<T, K>,
+		M extends K extends keyof (T["services"] & T["internal"])
+			? Extract<keyof S2, string> | (string & {})
+			: string = string,
+		P extends unknown[] = S2 extends Record<string, G.Handler>
+			? M extends keyof S2
+				? G.StripContext<S2[M]> extends (...args: infer Args) => unknown
+					? Args
+					: unknown[]
+				: unknown[]
+			: unknown[],
+		R = S2 extends Record<string, G.Handler>
+			? M extends keyof S2
+				? S2[M] extends (...args: infer _P) => Promise<infer Res>
+					? Res
+					: S2[M] extends (...args: infer _P) => infer Res
+						? Res
+						: unknown
+				: unknown
+			: unknown,
+	>(to: K, method: M, ...args: P): Promise<R> {
+		const id = to as string;
+		const mName = method as string;
+		const state = this._state;
+		const itpc = state.interceptors;
+		if (itpc.length > 0) {
+			const action: G.Action<G.Atlas> = {
 				type: "request",
 				to: id,
 				method: mName,
 				args: args as unknown[],
-			});
-		throw new Error(`[Genesis] Handler for ${id}:${mName} not found.`);
-	}
-
-	public connect<K extends keyof T["services"] | keyof T["internal"]>(
-		to: K,
-	): TargetProxy<T, K> {
-		const id = String(to);
-		const bridge = Object.create(null) as Record<string, () => void>;
-		const atlas = this._state.dispatchAtlas[id];
-		if (atlas) {
-			for (const mName of Object.keys(atlas)) {
-				bridge[mName] = (...args: unknown[]) =>
-					this.request(id as never, mName as never, ...(args as never[]));
+				sender: this.identity,
+			};
+			for (let i = 0; i < itpc.length; i++) {
+				const r = (itpc[i] as G.InterceptorFn<G.Atlas>)(action);
+				if (r instanceof Promise) await r;
 			}
 		}
-		return bridge as TargetProxy<T, K>;
+
+		const handler = state.dispatchAtlas[id]?.[mName];
+		if (!handler)
+			throw new Error(`[Genesis] Handler for ${id}:${mName} not found.`);
+
+		let context = state.contextCache.get(this.identity);
+		if (!context) {
+			context = this._createContext();
+			state.contextCache.set(this.identity, context);
+		}
+
+		const start = performance.now();
+		try {
+			const len = args.length;
+			const res =
+				len === 0
+					? handler(context)
+					: len === 1
+						? handler(context, args[0])
+						: len === 2
+							? handler(context, args[0], args[1])
+							: handler(context, ...(args as unknown[]));
+
+			if (res instanceof Promise) {
+				const result = await res;
+				const idx = this._getMetricsIndex(id);
+				const b = state.metricsBuffer;
+				b[idx + 0]!++;
+				b[idx + 2]! += performance.now() - start;
+				return result as R;
+			}
+
+			const idx = this._getMetricsIndex(id);
+			const b = state.metricsBuffer;
+			b[idx + 0]!++;
+			b[idx + 2]! += performance.now() - start;
+			return res as R;
+		} catch (error) {
+			const idx = this._getMetricsIndex(id);
+			state.metricsBuffer[idx + 1]!++;
+			if (itpc.length > 0) {
+				const action: G.Action<G.Atlas> = {
+					type: "request",
+					to: id,
+					method: mName,
+					args: args as unknown[],
+					sender: this.identity,
+					error,
+				};
+				for (let i = 0; i < itpc.length; i++) {
+					const r = (itpc[i] as G.InterceptorFn<G.Atlas>)(action);
+					if (r instanceof Promise) await r.catch(() => {});
+				}
+			}
+			throw error;
+		}
 	}
 
-	public async boot(): Promise<void> {
-		const scan = async (node: Genesis<GRegistry>, visited: Set<string>) => {
+	public connect<
+		K extends
+			| Extract<keyof T["services"] | keyof T["internal"], string>
+			| (string & {}),
+	>(to: K): G.TargetProxy<T, K> {
+		const cache = Object.create(null) as Record<
+			string,
+			(...args: unknown[]) => Promise<unknown>
+		>;
+		return new Proxy(Object.create(null), {
+			get: (_, method: string) => {
+				let handler = cache[method];
+				if (!handler) {
+					handler = (...args: unknown[]) => this.request(to, method, ...args);
+					cache[method] = handler;
+				}
+				return handler;
+			},
+		}) as unknown as G.TargetProxy<T, K>;
+	}
+
+	public async boot(): Promise<this> {
+		const nodes: Genesis<G.Atlas>[] = [];
+		const visited = new Set<string>();
+
+		const collect = (node: Genesis<G.Atlas, string>) => {
 			if (visited.has(node.identity)) return;
 			visited.add(node.identity);
-
-			const nodeState = node._state;
-			for (const [id, h] of Object.entries(nodeState.dispatchAtlas))
-				this._graft(id, h);
-
-			const context = Object.create(
-				nodeState.contextPrototype as object,
-			) as Record<string, unknown>;
-			context.g = node;
-			context.identity = node.identity;
-			const run = async (
-				list: ((c: GContextBase) => void | Promise<void>)[],
-			) => {
-				await Promise.all(
-					list.map((fn) =>
-						Promise.resolve(fn(context as unknown as GContextBase)),
-					),
-				);
-			};
-
-			await Promise.all([
-				run(nodeState.hooks.install),
-				run(nodeState.hooks.ready),
-			]);
-			await run(nodeState.extensions);
-			await run(nodeState.hooks.start);
-
-			await Promise.all(
-				nodeState.children.map(async (child) => {
-					const cState = child._state;
-					for (const [key, svc] of nodeState.servicesMap)
-						if (!cState.servicesMap.has(key)) cState.servicesMap.set(key, svc);
-					for (const [key, svc] of nodeState.internalMap)
-						if (!cState.internalMap.has(key)) cState.internalMap.set(key, svc);
-					for (const [key, val] of nodeState.decorationsMap)
-						if (!cState.decorationsMap.has(key))
-							cState.decorationsMap.set(key, val);
-					for (const [key, val] of nodeState.storeMap)
-						if (!cState.storeMap.has(key)) cState.storeMap.set(key, val);
-
-					// biome-ignore lint/suspicious/noExplicitAny: Internal bridge access
-					(child as any)._rebuildPrototype();
-
-					const orig = child.broadcast.bind(child);
-					child.broadcast = (event: never, payload: never) => {
-						orig(event, payload);
-						(
-							this as unknown as {
-								_relay: (
-									e: string,
-									d: Record<string, unknown>,
-								) => Promise<void>;
-							}
-						)._relay(event as string, {
-							sender: child.identity,
-							event: event as string,
-							payload: payload,
-						});
-						return child;
-					};
-					await scan(child, visited);
-				}),
-			);
+			nodes.push(node as unknown as Genesis<G.Atlas>);
+			for (const child of node[INTERNAL].state.children) {
+				collect(child as Genesis<G.Atlas, string>);
+			}
 		};
-		await scan(new Genesis(this.identity, this._state), new Set());
+		collect(this as unknown as Genesis<G.Atlas, string>);
+
+		for (let i = 0; i < nodes.length; i++) {
+			nodes[i]![INTERNAL].rebuildPrototype();
+		}
+
+		const phases = ["install", "ready", "extension", "start"] as const;
+		for (let i = 0; i < phases.length; i++) {
+			const p = phases[i]!;
+			for (let j = 0; j < nodes.length; j++) {
+				const n = nodes[j]!;
+				const s = n[INTERNAL].state;
+				const h = p === "extension" ? s.extensions : s.hooks[p];
+				await n[INTERNAL].trigger(h as G.HookFn<G.Atlas>[], p);
+			}
+		}
+		return this;
 	}
 }
