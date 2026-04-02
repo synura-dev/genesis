@@ -226,56 +226,84 @@ export class Genesis<
 		return context as unknown as G.Context<G.Atlas>;
 	}
 
-	private async _trigger<U extends G.Atlas>(
+	private _trigger<U extends G.Atlas>(
 		hooks: G.HookFn<U>[],
 		name: "install" | "ready" | "start" | "stop" | "extension",
-	) {
+	): void | Promise<void> {
 		const context = this._createContext();
+		const interceptors = this._state.interceptors as G.InterceptorFn<G.Atlas>[];
+
+		const runInterceptors = (
+			idx: number,
+			error?: unknown,
+		): void | Promise<void> => {
+			for (let i = idx; i < interceptors.length; i++) {
+				const r = interceptors[i]!({
+					type: "hook",
+					name,
+					target: this.identity,
+					sender: this.identity,
+					error,
+				});
+				if (r instanceof Promise)
+					return r.then(() => runInterceptors(i + 1, error), () => {});
+			}
+		};
+
+		const runHooks = (idx: number): void | Promise<void> => {
+			for (let i = idx; i < hooks.length; i++) {
+				const hook = hooks[i];
+				if (hook) {
+					const r = (hook as G.HookFn<G.Atlas>)(context as G.Context<G.Atlas>);
+					if (r instanceof Promise) return r.then(() => runHooks(i + 1));
+				}
+			}
+		};
 
 		try {
-			const interceptors = this._state.interceptors;
 			if (interceptors.length > 0) {
-				for (let i = 0; i < interceptors.length; i++) {
-					const r = (interceptors[i] as G.InterceptorFn<G.Atlas>)({
-						type: "hook",
-						name,
-						target: this.identity,
-						sender: this.identity,
+				const itpc = runInterceptors(0);
+				if (itpc instanceof Promise) {
+					return itpc.then(() => {
+						const hr = runHooks(0);
+						if (hr instanceof Promise) return hr;
 					});
-					if (r instanceof Promise) await r;
 				}
 			}
 
-			for (let i = 0; i < hooks.length; i++) {
-				const hook = hooks[i];
-				if (hook)
-					await (hook as G.HookFn<G.Atlas>)(context as G.Context<G.Atlas>);
+			const hr = runHooks(0);
+			if (hr instanceof Promise) {
+				return hr.catch((error) => {
+					if (interceptors.length > 0) {
+						const itpc = runInterceptors(0, error);
+						if (itpc instanceof Promise) return itpc.then(() => { throw error; });
+					}
+					throw error;
+				});
 			}
 		} catch (error) {
-			const interceptors = this._state.interceptors;
 			if (interceptors.length > 0) {
-				for (let i = 0; i < interceptors.length; i++) {
-					const r = (interceptors[i] as G.InterceptorFn<G.Atlas>)({
-						type: "hook",
-						name,
-						target: this.identity,
-						sender: this.identity,
-						error,
-					});
-					if (r instanceof Promise) await r.catch(() => {});
-				}
+				const itpc = runInterceptors(0, error);
+				if (itpc instanceof Promise) return itpc.then(() => { throw error; });
 			}
 			throw error;
 		}
 	}
 
-	public async heal(): Promise<void> {
+	public heal(): void | Promise<void> {
 		this._state.healthMap.set(this.identity, G.Health.Healthy);
 		this._getMetricsIndex(this.identity);
 		const h = this._state.hooks;
-		await this._trigger(h.install, "install");
-		await this._trigger(h.ready, "ready");
-		await this._trigger(h.start, "start");
+		const p1 = this._trigger(h.install, "install");
+		if (p1 instanceof Promise) {
+			return p1.then(() => this._trigger(h.ready, "ready"))
+				.then(() => this._trigger(h.start, "start"));
+		}
+		const p2 = this._trigger(h.ready, "ready");
+		if (p2 instanceof Promise) {
+			return p2.then(() => this._trigger(h.start, "start"));
+		}
+		return this._trigger(h.start, "start");
 	}
 
 	public use<U extends G.Atlas>(
@@ -493,27 +521,50 @@ export class Genesis<
 		};
 	}
 
-	public async broadcast<
+	public broadcast<
 		K extends Extract<keyof T["events"], string> | (string & {}),
 	>(
 		event: K,
 		payload: K extends keyof T["events"] ? T["events"][K] : unknown,
-	): Promise<Genesis<T, Id>> {
-		await this._relay(event as string, {
+	): Genesis<T, Id> | Promise<Genesis<T, Id>> {
+		const res = this._relay(event as string, {
 			sender: this.identity,
 			event: event as string,
 			payload,
 		});
+		if (res instanceof Promise) return res.then(() => this._evolve<T>(this._state));
 		return this._evolve<T>(this._state);
 	}
 
-	private async _relay(
+	private _relay(
 		event: string,
 		data: { sender: string; event: string; payload: unknown },
-	) {
+	): void | Promise<void> {
 		const start = performance.now();
 		const idx = this._getMetricsIndex(data.sender);
 		const itpc = this._state.interceptors;
+
+		const runInterceptors = (error?: unknown): void | Promise<void> => {
+			const action: G.Action<G.Atlas> = {
+				type: "broadcast",
+				event,
+				payload: data.payload,
+				sender: data.sender,
+				error,
+			};
+			for (let i = 0; i < itpc.length; i++) {
+				const r = itpc[i]!(action);
+				if (r instanceof Promise) return r.catch(() => {});
+			}
+		};
+
+		const executeRelay = (): void | Promise<void> => {
+			this._state.eventEmitter.emit(event, data);
+			const b = this._state.metricsBuffer;
+			b[idx + 0]!++;
+			b[idx + 2]! += performance.now() - start;
+		};
+
 		try {
 			if (itpc.length > 0) {
 				const action: G.Action<G.Atlas> = {
@@ -522,31 +573,24 @@ export class Genesis<
 					payload: data.payload,
 					sender: data.sender,
 				};
-				for (let i = 0; i < itpc.length; i++) {
-					const r = itpc[i]!(action);
-					if (r instanceof Promise) await r;
-				}
+
+				const runBatch = (idxBatch: number): void | Promise<void> => {
+					for (let i = idxBatch; i < itpc.length; i++) {
+						const r = itpc[i]!(action);
+						if (r instanceof Promise) return r.then(() => runBatch(i + 1));
+					}
+					return executeRelay();
+				};
+
+				return runBatch(0);
 			}
 
-			this._state.eventEmitter.emit(event, data);
-
-			const b = this._state.metricsBuffer;
-			b[idx + 0]!++;
-			b[idx + 2]! += performance.now() - start;
+			return executeRelay();
 		} catch (error) {
 			this._state.metricsBuffer[idx + 1]!++;
 			if (itpc.length > 0) {
-				const action: G.Action<G.Atlas> = {
-					type: "broadcast",
-					event,
-					payload: data.payload,
-					sender: data.sender,
-					error,
-				};
-				for (let i = 0; i < itpc.length; i++) {
-					const r = itpc[i]!(action);
-					if (r instanceof Promise) await r.catch(() => {});
-				}
+				const r = runInterceptors(error);
+				if (r instanceof Promise) return r.then(() => { throw error; });
 			}
 			throw error;
 		}
@@ -578,7 +622,7 @@ export class Genesis<
 		return () => this._state.eventEmitter.off(event as string, pipe);
 	}
 
-	public async request<
+	public request<
 		K extends
 			| Extract<keyof T["services"] | keyof T["internal"], string>
 			| (string & {}),
@@ -602,11 +646,76 @@ export class Genesis<
 						: unknown
 				: unknown
 			: unknown,
-	>(to: K, method: M, ...args: P): Promise<R> {
+	>(to: K, method: M, ...args: P): R | Promise<R> {
 		const id = to as string;
 		const mName = method as string;
 		const state = this._state;
 		const itpc = state.interceptors;
+		const start = performance.now();
+
+		const runInterceptors = (error?: unknown): void | Promise<void> => {
+			const action: G.Action<G.Atlas> = {
+				type: "request",
+				to: id,
+				method: mName,
+				args: args as unknown[],
+				sender: this.identity,
+				error,
+			};
+			for (let i = 0; i < itpc.length; i++) {
+				const r = (itpc[i] as G.InterceptorFn<G.Atlas>)(action);
+				if (r instanceof Promise) return r.catch(() => {});
+			}
+		};
+
+		const executeHandler = (): R | Promise<R> => {
+			const handler = state.dispatchAtlas[id]?.[mName];
+			if (!handler)
+				throw new Error(`[Genesis] Handler for ${id}:${mName} not found.`);
+
+			let context = state.contextCache.get(this.identity);
+			if (!context) {
+				context = this._createContext();
+				state.contextCache.set(this.identity, context);
+			}
+
+			try {
+				const len = args.length;
+				const res =
+					len === 0
+						? handler(context)
+						: len === 1
+							? handler(context, args[0])
+							: len === 2
+								? handler(context, args[0], args[1])
+								: handler(context, ...(args as unknown[]));
+
+				if (res instanceof Promise) {
+					return res.then((result) => {
+						const idx = this._getMetricsIndex(id);
+						const b = state.metricsBuffer;
+						b[idx + 0]!++;
+						b[idx + 2]! += performance.now() - start;
+						return result as R;
+					});
+				}
+
+				const idx = this._getMetricsIndex(id);
+				const b = state.metricsBuffer;
+				b[idx + 0]!++;
+				b[idx + 2]! += performance.now() - start;
+				return res as R;
+			} catch (error) {
+				const idx = this._getMetricsIndex(id);
+				state.metricsBuffer[idx + 1]!++;
+				if (itpc.length > 0) {
+					const r = runInterceptors(error);
+					if (r instanceof Promise) return r.then(() => { throw error; });
+				}
+				throw error;
+			}
+		};
+
 		if (itpc.length > 0) {
 			const action: G.Action<G.Atlas> = {
 				type: "request",
@@ -615,67 +724,21 @@ export class Genesis<
 				args: args as unknown[],
 				sender: this.identity,
 			};
-			for (let i = 0; i < itpc.length; i++) {
-				const r = (itpc[i] as G.InterceptorFn<G.Atlas>)(action);
-				if (r instanceof Promise) await r;
-			}
-		}
 
-		const handler = state.dispatchAtlas[id]?.[mName];
-		if (!handler)
-			throw new Error(`[Genesis] Handler for ${id}:${mName} not found.`);
-
-		let context = state.contextCache.get(this.identity);
-		if (!context) {
-			context = this._createContext();
-			state.contextCache.set(this.identity, context);
-		}
-
-		const start = performance.now();
-		try {
-			const len = args.length;
-			const res =
-				len === 0
-					? handler(context)
-					: len === 1
-						? handler(context, args[0])
-						: len === 2
-							? handler(context, args[0], args[1])
-							: handler(context, ...(args as unknown[]));
-
-			if (res instanceof Promise) {
-				const result = await res;
-				const idx = this._getMetricsIndex(id);
-				const b = state.metricsBuffer;
-				b[idx + 0]!++;
-				b[idx + 2]! += performance.now() - start;
-				return result as R;
-			}
-
-			const idx = this._getMetricsIndex(id);
-			const b = state.metricsBuffer;
-			b[idx + 0]!++;
-			b[idx + 2]! += performance.now() - start;
-			return res as R;
-		} catch (error) {
-			const idx = this._getMetricsIndex(id);
-			state.metricsBuffer[idx + 1]!++;
-			if (itpc.length > 0) {
-				const action: G.Action<G.Atlas> = {
-					type: "request",
-					to: id,
-					method: mName,
-					args: args as unknown[],
-					sender: this.identity,
-					error,
-				};
-				for (let i = 0; i < itpc.length; i++) {
+			const runInterceptorsBatch = (idx: number): R | Promise<R> => {
+				for (let i = idx; i < itpc.length; i++) {
 					const r = (itpc[i] as G.InterceptorFn<G.Atlas>)(action);
-					if (r instanceof Promise) await r.catch(() => {});
+					if (r instanceof Promise) {
+						return r.then(() => runInterceptorsBatch(i + 1));
+					}
 				}
-			}
-			throw error;
+				return executeHandler();
+			};
+
+			return runInterceptorsBatch(0);
 		}
+
+		return executeHandler();
 	}
 
 	public connect<
@@ -685,7 +748,7 @@ export class Genesis<
 	>(to: K): G.TargetProxy<T, K> {
 		const cache = Object.create(null) as Record<
 			string,
-			(...args: unknown[]) => Promise<unknown>
+			(...args: unknown[]) => unknown | Promise<unknown>
 		>;
 		return new Proxy(Object.create(null), {
 			get: (_, method: string) => {
@@ -699,7 +762,7 @@ export class Genesis<
 		}) as unknown as G.TargetProxy<T, K>;
 	}
 
-	public async boot(): Promise<this> {
+	public boot(): this | Promise<this> {
 		const nodes: Genesis<G.Atlas>[] = [];
 		const visited = new Set<string>();
 
@@ -718,15 +781,25 @@ export class Genesis<
 		}
 
 		const phases = ["install", "ready", "extension", "start"] as const;
-		for (let i = 0; i < phases.length; i++) {
-			const p = phases[i]!;
-			for (let j = 0; j < nodes.length; j++) {
+
+		const runPhase = (pIdx: number, nIdx: number): void | Promise<void> => {
+			if (pIdx >= phases.length) return;
+
+			const p = phases[pIdx]!;
+			for (let j = nIdx; j < nodes.length; j++) {
 				const n = nodes[j]!;
 				const s = n[INTERNAL].state;
 				const h = p === "extension" ? s.extensions : s.hooks[p];
-				await n[INTERNAL].trigger(h as G.HookFn<G.Atlas>[], p);
+				const r = n[INTERNAL].trigger(h as G.HookFn<G.Atlas>[], p);
+				if (r instanceof Promise) {
+					return r.then(() => runPhase(pIdx, j + 1));
+				}
 			}
-		}
+			return runPhase(pIdx + 1, 0);
+		};
+
+		const result = runPhase(0, 0);
+		if (result instanceof Promise) return result.then(() => this);
 		return this;
 	}
 }

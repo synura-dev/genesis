@@ -81,11 +81,11 @@ export namespace G {
 		relay(
 			event: string,
 			data: { sender: string; event: string; payload: unknown },
-		): Promise<void>;
+		): void | Promise<void>;
 		trigger(
 			hooks: HookFn<Atlas>[],
 			name: "install" | "ready" | "start" | "stop" | "extension",
-		): Promise<void>;
+		): void | Promise<void>;
 	}
 
 	/**
