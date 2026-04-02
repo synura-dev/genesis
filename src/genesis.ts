@@ -274,6 +274,13 @@ export class Genesis<
 			const hr = runHooks(0);
 			if (hr instanceof Promise) {
 				return hr.catch((error) => {
+					if (error instanceof Error && !("genesis" in error)) {
+						Object.defineProperty(error, "genesis", {
+							value: { type: "HOOK_ERROR", target: this.identity, name },
+							enumerable: false,
+							configurable: true,
+						});
+					}
 					if (interceptors.length > 0) {
 						const itpc = runInterceptors(0, error);
 						if (itpc instanceof Promise) return itpc.then(() => { throw error; });
@@ -282,6 +289,13 @@ export class Genesis<
 				});
 			}
 		} catch (error) {
+			if (error instanceof Error && !("genesis" in error)) {
+				Object.defineProperty(error, "genesis", {
+					value: { type: "HOOK_ERROR", target: this.identity, name },
+					enumerable: false,
+					configurable: true,
+				});
+			}
 			if (interceptors.length > 0) {
 				const itpc = runInterceptors(0, error);
 				if (itpc instanceof Promise) return itpc.then(() => { throw error; });
@@ -577,7 +591,17 @@ export class Genesis<
 				const runBatch = (idxBatch: number): void | Promise<void> => {
 					for (let i = idxBatch; i < itpc.length; i++) {
 						const r = itpc[i]!(action);
-						if (r instanceof Promise) return r.then(() => runBatch(i + 1));
+						if (r instanceof Promise) {
+							return r.then(() => runBatch(i + 1), (error) => {
+								this._state.metricsBuffer[idx + 0]!++;
+								this._state.metricsBuffer[idx + 1]!++;
+								if (itpc.length > 0) {
+									const ri = runInterceptors(error);
+									if (ri instanceof Promise) return ri.then(() => { throw error; });
+								}
+								throw error;
+							});
+						}
 					}
 					return executeRelay();
 				};
@@ -587,6 +611,7 @@ export class Genesis<
 
 			return executeRelay();
 		} catch (error) {
+			this._state.metricsBuffer[idx + 0]!++;
 			this._state.metricsBuffer[idx + 1]!++;
 			if (itpc.length > 0) {
 				const r = runInterceptors(error);
@@ -691,13 +716,34 @@ export class Genesis<
 								: handler(context, ...(args as unknown[]));
 
 				if (res instanceof Promise) {
-					return res.then((result) => {
-						const idx = this._getMetricsIndex(id);
-						const b = state.metricsBuffer;
-						b[idx + 0]!++;
-						b[idx + 2]! += performance.now() - start;
-						return result as R;
-					});
+					return res.then(
+						(result) => {
+							const idx = this._getMetricsIndex(id);
+							const b = state.metricsBuffer;
+							b[idx + 0]!++;
+							b[idx + 2]! += performance.now() - start;
+							return result as R;
+						},
+						async (error) => {
+							const idx = this._getMetricsIndex(id);
+							const b = state.metricsBuffer;
+							b[idx + 0]!++;
+							b[idx + 1]!++;
+							if (error instanceof Error && !("genesis" in error)) {
+								Object.defineProperty(error, "genesis", {
+									value: { type: "HANDLER_ERROR", to: id, method: mName },
+									enumerable: false,
+									configurable: true,
+								});
+							}
+							if (itpc.length > 0) {
+								const r = runInterceptors(error);
+								if (r instanceof Promise) await r;
+								throw error;
+							}
+							throw error;
+						},
+					);
 				}
 
 				const idx = this._getMetricsIndex(id);
@@ -707,7 +753,16 @@ export class Genesis<
 				return res as R;
 			} catch (error) {
 				const idx = this._getMetricsIndex(id);
-				state.metricsBuffer[idx + 1]!++;
+				const b = state.metricsBuffer;
+				b[idx + 0]!++;
+				b[idx + 1]!++;
+				if (error instanceof Error && !("genesis" in error)) {
+					Object.defineProperty(error, "genesis", {
+						value: { type: "HANDLER_ERROR", to: id, method: mName },
+						enumerable: false,
+						configurable: true,
+					});
+				}
 				if (itpc.length > 0) {
 					const r = runInterceptors(error);
 					if (r instanceof Promise) return r.then(() => { throw error; });
