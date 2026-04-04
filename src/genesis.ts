@@ -246,7 +246,10 @@ export class Genesis<
 					error,
 				});
 				if (r instanceof Promise)
-					return r.then(() => runInterceptors(i + 1, error), () => {});
+					return r.then(
+						() => runInterceptors(i + 1, error),
+						() => {},
+					);
 			}
 		};
 
@@ -283,7 +286,10 @@ export class Genesis<
 					}
 					if (interceptors.length > 0) {
 						const itpc = runInterceptors(0, error);
-						if (itpc instanceof Promise) return itpc.then(() => { throw error; });
+						if (itpc instanceof Promise)
+							return itpc.then(() => {
+								throw error;
+							});
 					}
 					throw error;
 				});
@@ -298,7 +304,10 @@ export class Genesis<
 			}
 			if (interceptors.length > 0) {
 				const itpc = runInterceptors(0, error);
-				if (itpc instanceof Promise) return itpc.then(() => { throw error; });
+				if (itpc instanceof Promise)
+					return itpc.then(() => {
+						throw error;
+					});
 			}
 			throw error;
 		}
@@ -310,7 +319,8 @@ export class Genesis<
 		const h = this._state.hooks;
 		const p1 = this._trigger(h.install, "install");
 		if (p1 instanceof Promise) {
-			return p1.then(() => this._trigger(h.ready, "ready"))
+			return p1
+				.then(() => this._trigger(h.ready, "ready"))
 				.then(() => this._trigger(h.start, "start"));
 		}
 		const p2 = this._trigger(h.ready, "ready");
@@ -546,7 +556,8 @@ export class Genesis<
 			event: event as string,
 			payload,
 		});
-		if (res instanceof Promise) return res.then(() => this._evolve<T>(this._state));
+		if (res instanceof Promise)
+			return res.then(() => this._evolve<T>(this._state));
 		return this._evolve<T>(this._state);
 	}
 
@@ -592,15 +603,21 @@ export class Genesis<
 					for (let i = idxBatch; i < itpc.length; i++) {
 						const r = itpc[i]!(action);
 						if (r instanceof Promise) {
-							return r.then(() => runBatch(i + 1), (error) => {
-								this._state.metricsBuffer[idx + 0]!++;
-								this._state.metricsBuffer[idx + 1]!++;
-								if (itpc.length > 0) {
-									const ri = runInterceptors(error);
-									if (ri instanceof Promise) return ri.then(() => { throw error; });
-								}
-								throw error;
-							});
+							return r.then(
+								() => runBatch(i + 1),
+								async (error) => {
+									this._state.metricsBuffer[idx + 0]!++;
+									this._state.metricsBuffer[idx + 1]!++;
+									if (itpc.length > 0) {
+										const ri = runInterceptors(error);
+										if (ri instanceof Promise)
+											return ri.then(() => {
+												throw error;
+											});
+									}
+									throw error;
+								},
+							);
 						}
 					}
 					return executeRelay();
@@ -615,7 +632,10 @@ export class Genesis<
 			this._state.metricsBuffer[idx + 1]!++;
 			if (itpc.length > 0) {
 				const r = runInterceptors(error);
-				if (r instanceof Promise) return r.then(() => { throw error; });
+				if (r instanceof Promise)
+					return r.then(() => {
+						throw error;
+					});
 			}
 			throw error;
 		}
@@ -765,7 +785,10 @@ export class Genesis<
 				}
 				if (itpc.length > 0) {
 					const r = runInterceptors(error);
-					if (r instanceof Promise) return r.then(() => { throw error; });
+					if (r instanceof Promise)
+						return r.then(() => {
+							throw error;
+						});
 				}
 				throw error;
 			}
