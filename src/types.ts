@@ -259,7 +259,7 @@ export namespace G {
 		// TYPEDARRAY METRICS ENGINE
 		metricsBuffer: Float64Array;
 		readonly metricsIndexMap: Map<GIdentity, number>;
-		metricsNextIndex: number;
+		metricsNextIndex: Uint32Array;
 
 		readonly dispatchAtlas: Record<string | symbol, Record<string, Handler>> & {
 			[INTERNAL_STORE]?: Record<string, unknown>;

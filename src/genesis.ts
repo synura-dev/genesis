@@ -39,7 +39,7 @@ export class Genesis<
 				healthMap: new Map(),
 				metricsBuffer: new Float64Array(4096),
 				metricsIndexMap: new Map(),
-				metricsNextIndex: 0,
+				metricsNextIndex: new Uint32Array(1),
 				dispatchAtlas: Object.create(null),
 				contextCache: new Map(),
 				contextPrototype: {},
@@ -69,11 +69,11 @@ export class Genesis<
 		let idx = m.metricsIndexMap.get(id);
 		if (idx !== undefined) return idx;
 
-		idx = m.metricsNextIndex;
+		idx = m.metricsNextIndex[0]!;
 		m.metricsIndexMap.set(id, idx);
-		m.metricsNextIndex += 4;
+		m.metricsNextIndex[0]! += 4;
 
-		if (m.metricsNextIndex >= m.metricsBuffer.length) {
+		if (m.metricsNextIndex[0]! >= m.metricsBuffer.length) {
 			const newBuffer = new Float64Array(m.metricsBuffer.length * 2);
 			newBuffer.set(m.metricsBuffer);
 			m.metricsBuffer = newBuffer;
@@ -367,6 +367,7 @@ export class Genesis<
 			decorationsMap: s.decorationsMap,
 			metricsBuffer: s.metricsBuffer,
 			metricsIndexMap: s.metricsIndexMap,
+			metricsNextIndex: s.metricsNextIndex,
 			eventEmitter: s.eventEmitter,
 			dispatchAtlas: s.dispatchAtlas,
 			contextCache: s.contextCache,
