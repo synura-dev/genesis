@@ -4,7 +4,7 @@ import { type G, INTERNAL_STORE } from "./types";
  * GLogic: The Execution Engine for Genesis
  * Separation of Concerns: Handles the actual mutation of GState.
  */
-export class GLogic {
+export class GRegistry {
 	/**
 	 * Registry: Central dispatcher for GState mutations during plugin registration.
 	 */

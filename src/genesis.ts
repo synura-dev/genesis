@@ -1,7 +1,6 @@
-/** biome-ignore-all lint/style/noNonNullAssertion: Using non-null assertions for performance */
 import { EventEmitter } from "eventemitter3";
 import { GFluent } from "./fluent";
-import { GLogic } from "./logic";
+import { GRegistry } from "./registry";
 import { G, type GIdentity, INTERNAL, INTERNAL_STORE } from "./types";
 
 /**
@@ -13,7 +12,7 @@ export class Genesis<
 	Id extends string = string,
 > extends GFluent<T, G.State> {
 	public readonly identity: Id;
-	protected readonly _logic: GLogic;
+	protected readonly _registry: GRegistry;
 	public get [INTERNAL](): G.Bridge {
 		return {
 			state: this._state,
@@ -28,7 +27,7 @@ export class Genesis<
 		};
 	}
 
-	constructor(name: Id, state?: G.State, logic?: GLogic) {
+	constructor(name: Id, state?: G.State, logic?: GRegistry) {
 		super(
 			state ?? {
 				servicesMap: new Map(),
@@ -54,14 +53,14 @@ export class Genesis<
 		);
 
 		this.identity = name;
-		this._logic = logic ?? new GLogic();
+		this._registry = logic ?? new GRegistry();
 		this._rebuildPrototype();
 	}
 
 	protected override _evolve<NewT extends G.Atlas>(
 		nextState: G.State,
 	): Genesis<NewT, Id> {
-		return new Genesis<NewT, Id>(this.identity, nextState, this._logic);
+		return new Genesis<NewT, Id>(this.identity, nextState, this._registry);
 	}
 
 	private _getMetricsIndex(id: string): number {
@@ -69,11 +68,11 @@ export class Genesis<
 		let idx = m.metricsIndexMap.get(id);
 		if (idx !== undefined) return idx;
 
-		idx = m.metricsNextIndex[0]!;
+		idx = m.metricsNextIndex[0] ?? 0;
 		m.metricsIndexMap.set(id, idx);
-		m.metricsNextIndex[0]! += 4;
+		m.metricsNextIndex[0] = idx + 4;
 
-		if (m.metricsNextIndex[0]! >= m.metricsBuffer.length) {
+		if ((m.metricsNextIndex[0] ?? 0) >= m.metricsBuffer.length) {
 			const newBuffer = new Float64Array(m.metricsBuffer.length * 2);
 			newBuffer.set(m.metricsBuffer);
 			m.metricsBuffer = newBuffer;
@@ -102,7 +101,7 @@ export class Genesis<
 		payload: G.RegistrationSchema[K],
 	): Genesis<NewT, Id> {
 		const entry = { type, payload } as G.RegistrationEntry;
-		this._logic.registry(this.identity, this._state, entry, (id, h) =>
+		this._registry.registry(this.identity, this._state, entry, (id, h) =>
 			this._graft(id, h),
 		);
 		this._rebuildPrototype();
@@ -238,7 +237,9 @@ export class Genesis<
 			error?: unknown,
 		): void | Promise<void> => {
 			for (let i = idx; i < interceptors.length; i++) {
-				const r = interceptors[i]!({
+				const interceptor = interceptors[i];
+				if (!interceptor) continue;
+				const r = interceptor({
 					type: "hook",
 					name,
 					target: this.identity,
@@ -579,7 +580,9 @@ export class Genesis<
 				error,
 			};
 			for (let i = 0; i < itpc.length; i++) {
-				const r = itpc[i]!(action);
+				const interceptor = itpc[i];
+				if (!interceptor) continue;
+				const r = interceptor(action);
 				if (r instanceof Promise) return r.catch(() => {});
 			}
 		};
@@ -587,8 +590,8 @@ export class Genesis<
 		const executeRelay = (): void | Promise<void> => {
 			this._state.eventEmitter.emit(event, data);
 			const b = this._state.metricsBuffer;
-			b[idx + 0]!++;
-			b[idx + 2]! += performance.now() - start;
+			b[idx + 0] = (b[idx + 0] ?? 0) + 1;
+			b[idx + 2] = (b[idx + 2] ?? 0) + (performance.now() - start);
 		};
 
 		try {
@@ -602,13 +605,16 @@ export class Genesis<
 
 				const runBatch = (idxBatch: number): void | Promise<void> => {
 					for (let i = idxBatch; i < itpc.length; i++) {
-						const r = itpc[i]!(action);
+						const interceptor = itpc[i];
+						if (!interceptor) continue;
+						const r = interceptor(action);
 						if (r instanceof Promise) {
 							return r.then(
 								() => runBatch(i + 1),
 								async (error) => {
-									this._state.metricsBuffer[idx + 0]!++;
-									this._state.metricsBuffer[idx + 1]!++;
+									const b = this._state.metricsBuffer;
+									b[idx + 0] = (b[idx + 0] ?? 0) + 1;
+									b[idx + 1] = (b[idx + 1] ?? 0) + 1;
 									if (itpc.length > 0) {
 										const ri = runInterceptors(error);
 										if (ri instanceof Promise)
@@ -629,8 +635,9 @@ export class Genesis<
 
 			return executeRelay();
 		} catch (error) {
-			this._state.metricsBuffer[idx + 0]!++;
-			this._state.metricsBuffer[idx + 1]!++;
+			const b = this._state.metricsBuffer;
+			b[idx + 0] = (b[idx + 0] ?? 0) + 1;
+			b[idx + 1] = (b[idx + 1] ?? 0) + 1;
 			if (itpc.length > 0) {
 				const r = runInterceptors(error);
 				if (r instanceof Promise)
@@ -741,15 +748,15 @@ export class Genesis<
 						(result) => {
 							const idx = this._getMetricsIndex(id);
 							const b = state.metricsBuffer;
-							b[idx + 0]!++;
-							b[idx + 2]! += performance.now() - start;
+							b[idx + 0] = (b[idx + 0] ?? 0) + 1;
+							b[idx + 2] = (b[idx + 2] ?? 0) + (performance.now() - start);
 							return result as R;
 						},
 						async (error) => {
 							const idx = this._getMetricsIndex(id);
 							const b = state.metricsBuffer;
-							b[idx + 0]!++;
-							b[idx + 1]!++;
+							b[idx + 0] = (b[idx + 0] ?? 0) + 1;
+							b[idx + 1] = (b[idx + 1] ?? 0) + 1;
 							if (error instanceof Error && !("genesis" in error)) {
 								Object.defineProperty(error, "genesis", {
 									value: { type: "HANDLER_ERROR", to: id, method: mName },
@@ -769,14 +776,14 @@ export class Genesis<
 
 				const idx = this._getMetricsIndex(id);
 				const b = state.metricsBuffer;
-				b[idx + 0]!++;
-				b[idx + 2]! += performance.now() - start;
+				b[idx + 0] = (b[idx + 0] ?? 0) + 1;
+				b[idx + 2] = (b[idx + 2] ?? 0) + (performance.now() - start);
 				return res as R;
 			} catch (error) {
 				const idx = this._getMetricsIndex(id);
 				const b = state.metricsBuffer;
-				b[idx + 0]!++;
-				b[idx + 1]!++;
+				b[idx + 0] = (b[idx + 0] ?? 0) + 1;
+				b[idx + 1] = (b[idx + 1] ?? 0) + 1;
 				if (error instanceof Error && !("genesis" in error)) {
 					Object.defineProperty(error, "genesis", {
 						value: { type: "HANDLER_ERROR", to: id, method: mName },
@@ -856,17 +863,21 @@ export class Genesis<
 		collect(this as unknown as Genesis<G.Atlas, string>);
 
 		for (let i = 0; i < nodes.length; i++) {
-			nodes[i]![INTERNAL].rebuildPrototype();
+			const node = nodes[i];
+			if (!node) continue;
+			node[INTERNAL].rebuildPrototype();
 		}
 
 		const phases = ["install", "ready", "extension", "start"] as const;
 
 		const runPhase = (pIdx: number, nIdx: number): void | Promise<void> => {
-			if (pIdx >= phases.length) return;
+			const p = phases[pIdx];
+			if (!p) return;
 
-			const p = phases[pIdx]!;
 			for (let j = nIdx; j < nodes.length; j++) {
-				const n = nodes[j]!;
+				const n = nodes[j];
+				if (!n) continue;
+
 				const s = n[INTERNAL].state;
 				const h = p === "extension" ? s.extensions : s.hooks[p];
 				const r = n[INTERNAL].trigger(h as G.HookFn<G.Atlas>[], p);
