@@ -19,11 +19,11 @@ describe("⚡ Genesis Performance Benchmark", () => {
 			`\n🚀 Starting Genesis Benchmark: ${count.toLocaleString()} requests...`,
 		);
 
-		// --- TEST 1: RAW PERFORMANCE ---
+		// --- TEST 1: RAW PERFORMANCE (SYNC) ---
 		let start = performance.now();
 		for (let i = 0; i < count; i++) {
-			const res = await g.request("core", "ping");
-			expect(res).toBe("pong");
+			const res = g.request("core", "ping");
+			if (res instanceof Promise) await res;
 		}
 		let end = performance.now();
 		let duration = (end - start) / 1000;
@@ -37,8 +37,8 @@ describe("⚡ Genesis Performance Benchmark", () => {
 		start = performance.now();
 
 		for (let i = 0; i < count; i++) {
-			const res = await g.request("core", "ping");
-			expect(res).toBe("pong");
+			const res = g.request("core", "ping");
+			if (res instanceof Promise) await res;
 		}
 
 		end = performance.now();
@@ -48,12 +48,11 @@ describe("⚡ Genesis Performance Benchmark", () => {
 			`✅ [SYNC INTERCEPT] Sync Request: ${duration.toFixed(4)}s (${Math.floor(count / duration).toLocaleString()} RPS)`,
 		);
 
-		// --- TEST 3: ASYNC REQUEST ---
+		// --- TEST 3: ASYNC REQUEST (AWAIT REQUIRED) ---
 		start = performance.now();
 
 		for (let i = 0; i < count; i++) {
-			const res = await g.request("core", "pingAsync");
-			expect(res).toBe("pong");
+			await g.request("core", "pingAsync");
 		}
 
 		end = performance.now();

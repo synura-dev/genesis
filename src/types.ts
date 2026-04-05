@@ -276,6 +276,11 @@ export namespace G {
 		readonly eventEmitter: EventEmitter;
 		readonly eventNames: Set<string>;
 		readonly interceptors: InterceptorFn[];
+		readonly pipelines: Map<string, Handler>;
+		relayPipeline: ((
+			event: string,
+			data: { sender: string; event: string; payload: unknown },
+		) => void | Promise<void>) | null;
 		readonly hooks: {
 			install: HookFn[];
 			ready: HookFn[];

@@ -45,6 +45,8 @@ export class Genesis<
 				eventEmitter: new EventEmitter(),
 				eventNames: new Set(),
 				interceptors: [],
+				pipelines: new Map(),
+				relayPipeline: null,
 				hooks: { install: [], ready: [], start: [], stop: [] },
 				extensions: [],
 				children: [],
@@ -105,6 +107,8 @@ export class Genesis<
 			this._graft(id, h),
 		);
 		this._rebuildPrototype();
+		this._rebuildPipelines();
+		this._rebuildRelayPipeline();
 		return this._evolve<NewT>(this._state);
 	}
 
@@ -215,6 +219,193 @@ export class Genesis<
 		}
 	}
 
+	private _compile(id: string, mName: string, h: G.Handler): G.Handler {
+		const s = this._state;
+		const b = s.metricsBuffer;
+		const idx = this._getMetricsIndex(id);
+		const snap = [...s.interceptors];
+		const n = snap.length;
+
+		return (ctx, ...args) => {
+			const start = performance.now();
+
+			// ⚡ FAST-PATH: No interceptors
+			if (n === 0) {
+				try {
+					const res = h(ctx, ...args);
+					if (res instanceof Promise) {
+						return res.then(
+							(r) => {
+								b[idx + 0] = (b[idx + 0] || 0) + 1;
+								b[idx + 2] = (b[idx + 2] || 0) + (performance.now() - start);
+								return r;
+							},
+							(e) => {
+								b[idx + 0] = (b[idx + 0] || 0) + 1;
+								b[idx + 1] = (b[idx + 1] || 0) + 1;
+								b[idx + 2] = (b[idx + 2] || 0) + (performance.now() - start);
+								if (e instanceof Error && !("genesis" in e)) {
+									Object.defineProperty(e, "genesis", {
+										value: { type: "HANDLER_ERROR", to: id, method: mName },
+										enumerable: false,
+										configurable: true,
+									});
+								}
+								throw e;
+							},
+						);
+					}
+					b[idx + 0] = (b[idx + 0] || 0) + 1;
+					b[idx + 2] = (b[idx + 2] || 0) + (performance.now() - start);
+					return res;
+				} catch (e) {
+					b[idx + 0] = (b[idx + 0] || 0) + 1;
+					b[idx + 1] = (b[idx + 1] || 0) + 1;
+					b[idx + 2] = (b[idx + 2] || 0) + (performance.now() - start);
+					if (e instanceof Error && !("genesis" in e)) {
+						Object.defineProperty(e, "genesis", {
+							value: { type: "HANDLER_ERROR", to: id, method: mName },
+							enumerable: false,
+							configurable: true,
+						});
+					}
+					throw e;
+				}
+			}
+
+			// ⚡ PATH: Using interceptors
+			const action: G.Action<G.Atlas> = {
+				type: "request",
+				to: id,
+				method: mName,
+				args,
+				sender: ctx.identity,
+			};
+
+			let i = 0;
+			const next = (): unknown | Promise<unknown> => {
+				while (i < n) {
+					const r = snap[i++]?.(action);
+					if (r instanceof Promise) return r.then(next);
+				}
+
+				// Execute Handler
+				try {
+					const res = h(ctx, ...args);
+					if (res instanceof Promise) {
+						return res.then(
+							(r) => {
+								b[idx + 0] = (b[idx + 0] || 0) + 1;
+								b[idx + 2] = (b[idx + 2] || 0) + (performance.now() - start);
+								return r;
+							},
+							(e) => {
+								b[idx + 0] = (b[idx + 0] || 0) + 1;
+								b[idx + 1] = (b[idx + 1] || 0) + 1;
+								b[idx + 2] = (b[idx + 2] || 0) + (performance.now() - start);
+								action.error = e;
+								let j = 0;
+								const failNext = (): void | Promise<void> => {
+									while (j < n) {
+										const fr = snap[j++]?.(action);
+										if (fr instanceof Promise)
+											return fr.catch(() => {}).then(failNext);
+									}
+									if (e instanceof Error && !("genesis" in e)) {
+										Object.defineProperty(e, "genesis", {
+											value: { type: "HANDLER_ERROR", to: id, method: mName },
+											enumerable: false,
+											configurable: true,
+										});
+									}
+									throw e;
+								};
+								return failNext();
+							},
+						);
+					}
+					b[idx + 0] = (b[idx + 0] || 0) + 1;
+					b[idx + 2] = (b[idx + 2] || 0) + (performance.now() - start);
+					return res;
+				} catch (e) {
+					b[idx + 0] = (b[idx + 0] || 0) + 1;
+					b[idx + 1] = (b[idx + 1] || 0) + 1;
+					b[idx + 2] = (b[idx + 2] || 0) + (performance.now() - start);
+					action.error = e;
+					let j = 0;
+					const failSync = (): void | Promise<void> => {
+						while (j < n) {
+							const fr = snap[j++]?.(action);
+							if (fr instanceof Promise)
+								return fr.catch(() => {}).then(failSync);
+						}
+						if (e instanceof Error && !("genesis" in e)) {
+							Object.defineProperty(e, "genesis", {
+								value: { type: "HANDLER_ERROR", to: id, method: mName },
+								enumerable: false,
+								configurable: true,
+							});
+						}
+						throw e;
+					};
+					const fr = failSync();
+					if (fr instanceof Promise) return fr;
+					throw e;
+				}
+			};
+
+			return next();
+		};
+	}
+
+	private _rebuildPipelines() {
+		const s = this._state;
+		s.pipelines.clear();
+		for (const id of Reflect.ownKeys(s.dispatchAtlas)) {
+			if (typeof id !== "string") continue;
+			const methods = s.dispatchAtlas[id];
+			if (!methods) continue;
+			for (const method of Object.keys(methods)) {
+				const h = methods[method];
+				if (h) s.pipelines.set(`${id}:${method}`, this._compile(id, method, h));
+			}
+		}
+	}
+
+	private _rebuildRelayPipeline() {
+		const s = this._state;
+		const itpc = s.interceptors;
+		const emitter = s.eventEmitter;
+		const b = s.metricsBuffer;
+
+		s.relayPipeline = (event, data) => {
+			const start = performance.now();
+			const idx = this._getMetricsIndex(data.sender);
+			const execute = () => {
+				emitter.emit(event, data);
+				b[idx + 0] = (b[idx + 0] ?? 0) + 1;
+				b[idx + 2] = (b[idx + 2] ?? 0) + (performance.now() - start);
+			};
+
+			if (itpc.length === 0) return execute();
+
+			const action: G.Action<G.Atlas> = {
+				type: "broadcast",
+				event,
+				payload: data.payload,
+				sender: data.sender,
+			};
+
+			let i = 0;
+			const next = (): void | Promise<void> => {
+				if (i >= itpc.length) return execute();
+				const r = itpc[i++]?.(action);
+				return r instanceof Promise ? r.then(next) : next();
+			};
+			return next();
+		};
+	}
+
 	private _createContext(): G.Context<G.Atlas> {
 		const context = Object.create(this._state.contextPrototype) as Record<
 			string,
@@ -317,6 +508,8 @@ export class Genesis<
 	public heal(): void | Promise<void> {
 		this._state.healthMap.set(this.identity, G.Health.Healthy);
 		this._getMetricsIndex(this.identity);
+		this._rebuildPipelines();
+		this._rebuildRelayPipeline();
 		const h = this._state.hooks;
 		const p1 = this._trigger(h.install, "install");
 		if (p1 instanceof Promise) {
@@ -373,6 +566,8 @@ export class Genesis<
 			dispatchAtlas: s.dispatchAtlas,
 			contextCache: s.contextCache,
 			interceptors: s.interceptors,
+			pipelines: s.pipelines,
+			relayPipeline: s.relayPipeline,
 			contextPrototype: s.contextPrototype,
 		});
 
@@ -477,6 +672,8 @@ export class Genesis<
 		fn: (action: G.Action<T>) => void | Promise<void>,
 	): Genesis<T, Id> {
 		this._state.interceptors.push(fn as G.InterceptorFn<G.Atlas>);
+		this._rebuildPipelines();
+		this._rebuildRelayPipeline();
 		return this._evolve<T>(this._state);
 	}
 
@@ -567,86 +764,7 @@ export class Genesis<
 		event: string,
 		data: { sender: string; event: string; payload: unknown },
 	): void | Promise<void> {
-		const start = performance.now();
-		const idx = this._getMetricsIndex(data.sender);
-		const itpc = this._state.interceptors;
-
-		const runInterceptors = (error?: unknown): void | Promise<void> => {
-			const action: G.Action<G.Atlas> = {
-				type: "broadcast",
-				event,
-				payload: data.payload,
-				sender: data.sender,
-				error,
-			};
-			for (let i = 0; i < itpc.length; i++) {
-				const interceptor = itpc[i];
-				if (!interceptor) continue;
-				const r = interceptor(action);
-				if (r instanceof Promise) return r.catch(() => {});
-			}
-		};
-
-		const executeRelay = (): void | Promise<void> => {
-			this._state.eventEmitter.emit(event, data);
-			const b = this._state.metricsBuffer;
-			b[idx + 0] = (b[idx + 0] ?? 0) + 1;
-			b[idx + 2] = (b[idx + 2] ?? 0) + (performance.now() - start);
-		};
-
-		try {
-			if (itpc.length > 0) {
-				const action: G.Action<G.Atlas> = {
-					type: "broadcast",
-					event,
-					payload: data.payload,
-					sender: data.sender,
-				};
-
-				const runBatch = (idxBatch: number): void | Promise<void> => {
-					for (let i = idxBatch; i < itpc.length; i++) {
-						const interceptor = itpc[i];
-						if (!interceptor) continue;
-						const r = interceptor(action);
-						if (r instanceof Promise) {
-							return r.then(
-								() => runBatch(i + 1),
-								async (error) => {
-									const b = this._state.metricsBuffer;
-									b[idx + 0] = (b[idx + 0] ?? 0) + 1;
-									b[idx + 1] = (b[idx + 1] ?? 0) + 1;
-									if (itpc.length > 0) {
-										const ri = runInterceptors(error);
-										if (ri instanceof Promise)
-											return ri.then(() => {
-												throw error;
-											});
-									}
-									throw error;
-								},
-							);
-						}
-					}
-					return executeRelay();
-				};
-
-				return runBatch(0);
-			}
-
-			return executeRelay();
-		} catch (error) {
-			const b = this._state.metricsBuffer;
-			b[idx + 0] = (b[idx + 0] ?? 0) + 1;
-			b[idx + 1] = (b[idx + 1] ?? 0) + 1;
-			if (itpc.length > 0) {
-				const r = runInterceptors(error);
-				if (r instanceof Promise)
-					return r.then(() => {
-						throw error;
-					});
-			}
-			throw error;
-		}
+		return this._state.relayPipeline?.(event, data);
 	}
 
 	public subscribe<
@@ -675,6 +793,7 @@ export class Genesis<
 		return () => this._state.eventEmitter.off(event as string, pipe);
 	}
 
+
 	public request<
 		K extends
 			| Extract<keyof T["services"] | keyof T["internal"], string>
@@ -700,131 +819,16 @@ export class Genesis<
 				: unknown
 			: unknown,
 	>(to: K, method: M, ...args: P): R | Promise<R> {
-		const id = to as string;
-		const mName = method as string;
-		const state = this._state;
-		const itpc = state.interceptors;
-		const start = performance.now();
+		const h = this._state.pipelines.get(`${to as string}:${method as string}`);
+		if (!h) throw new Error(`[Genesis] Handler for ${to as string}:${method as string} not found.`);
 
-		const runInterceptors = (error?: unknown): void | Promise<void> => {
-			const action: G.Action<G.Atlas> = {
-				type: "request",
-				to: id,
-				method: mName,
-				args: args as unknown[],
-				sender: this.identity,
-				error,
-			};
-			for (let i = 0; i < itpc.length; i++) {
-				const r = (itpc[i] as G.InterceptorFn<G.Atlas>)(action);
-				if (r instanceof Promise) return r.catch(() => {});
-			}
-		};
-
-		const executeHandler = (): R | Promise<R> => {
-			const handler = state.dispatchAtlas[id]?.[mName];
-			if (!handler)
-				throw new Error(`[Genesis] Handler for ${id}:${mName} not found.`);
-
-			let context = state.contextCache.get(this.identity);
-			if (!context) {
-				context = this._createContext();
-				state.contextCache.set(this.identity, context);
-			}
-
-			try {
-				const len = args.length;
-				const res =
-					len === 0
-						? handler(context)
-						: len === 1
-							? handler(context, args[0])
-							: len === 2
-								? handler(context, args[0], args[1])
-								: handler(context, ...(args as unknown[]));
-
-				if (res instanceof Promise) {
-					return res.then(
-						(result) => {
-							const idx = this._getMetricsIndex(id);
-							const b = state.metricsBuffer;
-							b[idx + 0] = (b[idx + 0] ?? 0) + 1;
-							b[idx + 2] = (b[idx + 2] ?? 0) + (performance.now() - start);
-							return result as R;
-						},
-						async (error) => {
-							const idx = this._getMetricsIndex(id);
-							const b = state.metricsBuffer;
-							b[idx + 0] = (b[idx + 0] ?? 0) + 1;
-							b[idx + 1] = (b[idx + 1] ?? 0) + 1;
-							if (error instanceof Error && !("genesis" in error)) {
-								Object.defineProperty(error, "genesis", {
-									value: { type: "HANDLER_ERROR", to: id, method: mName },
-									enumerable: false,
-									configurable: true,
-								});
-							}
-							if (itpc.length > 0) {
-								const r = runInterceptors(error);
-								if (r instanceof Promise) await r;
-								throw error;
-							}
-							throw error;
-						},
-					);
-				}
-
-				const idx = this._getMetricsIndex(id);
-				const b = state.metricsBuffer;
-				b[idx + 0] = (b[idx + 0] ?? 0) + 1;
-				b[idx + 2] = (b[idx + 2] ?? 0) + (performance.now() - start);
-				return res as R;
-			} catch (error) {
-				const idx = this._getMetricsIndex(id);
-				const b = state.metricsBuffer;
-				b[idx + 0] = (b[idx + 0] ?? 0) + 1;
-				b[idx + 1] = (b[idx + 1] ?? 0) + 1;
-				if (error instanceof Error && !("genesis" in error)) {
-					Object.defineProperty(error, "genesis", {
-						value: { type: "HANDLER_ERROR", to: id, method: mName },
-						enumerable: false,
-						configurable: true,
-					});
-				}
-				if (itpc.length > 0) {
-					const r = runInterceptors(error);
-					if (r instanceof Promise)
-						return r.then(() => {
-							throw error;
-						});
-				}
-				throw error;
-			}
-		};
-
-		if (itpc.length > 0) {
-			const action: G.Action<G.Atlas> = {
-				type: "request",
-				to: id,
-				method: mName,
-				args: args as unknown[],
-				sender: this.identity,
-			};
-
-			const runInterceptorsBatch = (idx: number): R | Promise<R> => {
-				for (let i = idx; i < itpc.length; i++) {
-					const r = (itpc[i] as G.InterceptorFn<G.Atlas>)(action);
-					if (r instanceof Promise) {
-						return r.then(() => runInterceptorsBatch(i + 1));
-					}
-				}
-				return executeHandler();
-			};
-
-			return runInterceptorsBatch(0);
+		let ctx = this._state.contextCache.get(this.identity);
+		if (!ctx) {
+			ctx = this._createContext();
+			this._state.contextCache.set(this.identity, ctx);
 		}
 
-		return executeHandler();
+		return h(ctx, ...(args as unknown[])) as R | Promise<R>;
 	}
 
 	public connect<
@@ -866,6 +870,8 @@ export class Genesis<
 			const node = nodes[i];
 			if (!node) continue;
 			node[INTERNAL].rebuildPrototype();
+			node._rebuildPipelines();
+			node._rebuildRelayPipeline();
 		}
 
 		const phases = ["install", "ready", "extension", "start"] as const;
