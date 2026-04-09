@@ -23,6 +23,7 @@ export namespace G {
 	export interface Atlas {
 		services: {};
 		internal: {};
+		private: {};
 		events: {};
 		decorations: {};
 		store: {};
@@ -34,6 +35,7 @@ export namespace G {
 	export interface Empty extends Atlas {
 		services: {};
 		internal: {};
+		private: {};
 		events: {};
 		decorations: {};
 		store: {};
@@ -43,14 +45,20 @@ export namespace G {
 	 * Optimized Merge (Combined Signature):
 	 * This prevents the IDE from unrolling the entire object structure in intermediate chain steps.
 	 */
-	export type Combine<T extends Atlas, U> = Simplify<{
-		services: T["services"] & (U extends { services: infer S } ? S : {});
-		internal: T["internal"] & (U extends { internal: infer I } ? I : {});
-		events: T["events"] & (U extends { events: infer E } ? E : {});
-		decorations: T["decorations"] &
-			(U extends { decorations: infer D } ? D : {});
-		store: T["store"] & (U extends { store: infer ST } ? ST : {});
-	}>;
+	export type Combine<T extends Atlas, U> = {
+		services: Simplify<
+			T["services"] & (U extends { services: infer S } ? S : {})
+		>;
+		internal: Simplify<
+			T["internal"] & (U extends { internal: infer I } ? I : {})
+		>;
+		private: Simplify<T["private"] & (U extends { private: infer P } ? P : {})>;
+		events: Simplify<T["events"] & (U extends { events: infer E } ? E : {})>;
+		decorations: Simplify<
+			T["decorations"] & (U extends { decorations: infer D } ? D : {})
+		>;
+		store: Simplify<T["store"] & (U extends { store: infer ST } ? ST : {})>;
+	};
 
 	/**
 	 * Atlas Blueprint Wrapper
@@ -116,11 +124,9 @@ export namespace G {
 	export type Discover<
 		T extends Atlas,
 		K extends string,
-	> = K extends keyof T["services"]
-		? T["services"][K]
-		: K extends keyof T["internal"]
-			? T["internal"][K]
-			: Record<string, Handler>;
+	> = K extends keyof (T["services"] & T["internal"])
+		? (T["services"] & T["internal"])[K]
+		: Record<string, Handler>;
 
 	/**
 	 * Utility: Strip the Context (the first parameter) from handler arguments for Proxy access.
@@ -276,11 +282,13 @@ export namespace G {
 		readonly eventEmitter: EventEmitter;
 		readonly eventNames: Set<string>;
 		readonly interceptors: InterceptorFn[];
-		readonly pipelines: Map<string, Handler>;
-		relayPipeline: ((
-			event: string,
-			data: { sender: string; event: string; payload: unknown },
-		) => void | Promise<void>) | null;
+		readonly pipelines: Map<string, Map<string, Handler>>;
+		relayPipeline:
+			| ((
+					event: string,
+					data: { sender: string; event: string; payload: unknown },
+			  ) => void | Promise<void>)
+			| null;
 		readonly hooks: {
 			install: HookFn[];
 			ready: HookFn[];

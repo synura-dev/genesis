@@ -41,7 +41,7 @@ export class Genesis<
 				metricsNextIndex: new Uint32Array(1),
 				dispatchAtlas: Object.create(null),
 				contextCache: new Map(),
-				contextPrototype: {},
+				contextPrototype: Object.create(null),
 				eventEmitter: new EventEmitter(),
 				eventNames: new Set(),
 				interceptors: [],
@@ -61,8 +61,12 @@ export class Genesis<
 
 	protected override _evolve<NewT extends G.Atlas>(
 		nextState: G.State,
-	): Genesis<NewT, Id> {
-		return new Genesis<NewT, Id>(this.identity, nextState, this._registry);
+	): Genesis<G.Simplify<NewT>, Id> {
+		return new Genesis<G.Simplify<NewT>, Id>(
+			this.identity,
+			nextState,
+			this._registry,
+		);
 	}
 
 	private _getMetricsIndex(id: string): number {
@@ -101,7 +105,7 @@ export class Genesis<
 	private _register<K extends keyof G.RegistrationSchema, NewT extends G.Atlas>(
 		type: K,
 		payload: G.RegistrationSchema[K],
-	): Genesis<NewT, Id> {
+	): Genesis<G.Simplify<NewT>, Id> {
 		const entry = { type, payload } as G.RegistrationEntry;
 		this._registry.registry(this.identity, this._state, entry, (id, h) =>
 			this._graft(id, h),
@@ -109,7 +113,7 @@ export class Genesis<
 		this._rebuildPrototype();
 		this._rebuildPipelines();
 		this._rebuildRelayPipeline();
-		return this._evolve<NewT>(this._state);
+		return this._evolve<G.Simplify<NewT>>(this._state);
 	}
 
 	public expose<
@@ -118,7 +122,7 @@ export class Genesis<
 			// biome-ignore lint/suspicious/noExplicitAny: Allow any parameters in service definition
 			(ctx: G.Context<T>, ...args: any[]) => unknown | Promise<unknown>
 		>,
-	>(instance: S): Genesis<G.Combine<T, { services: { [K in Id]: S } }>, Id> {
+	>(instance: S): Genesis<G.Simplify<G.Combine<T, { services: { [K in Id]: S } }>>, Id> {
 		return this._register(
 			"services",
 			instance as unknown as Record<string, G.Handler>,
@@ -131,7 +135,7 @@ export class Genesis<
 			// biome-ignore lint/suspicious/noExplicitAny: Allow any parameters in internal service definition
 			(ctx: G.Context<T>, ...args: any[]) => unknown | Promise<unknown>
 		>,
-	>(instance: S): Genesis<G.Combine<T, { internal: { [K in Id]: S } }>, Id> {
+	>(instance: S): Genesis<G.Simplify<G.Combine<T, { internal: { [K in Id]: S } }>>, Id> {
 		return this._register(
 			"internal",
 			instance as unknown as Record<string, G.Handler>,
@@ -153,14 +157,14 @@ export class Genesis<
 
 	public events<E extends Record<string, unknown>>(
 		names?: (keyof E)[],
-	): Genesis<G.Combine<T, { events: E }>, Id>;
+	): Genesis<G.Simplify<G.Combine<T, { events: E }>>, Id>;
 	public events<const E extends string[]>(
 		...names: E
-	): Genesis<G.Combine<T, { events: { [K in E[number]]: unknown } }>, Id>;
+	): Genesis<G.Simplify<G.Combine<T, { events: { [K in E[number]]: unknown } }>>, Id>;
 	public events<NewT extends G.Atlas>(
 		namesOrFirst?: unknown,
 		...rest: unknown[]
-	): Genesis<NewT, Id> {
+	): Genesis<G.Simplify<NewT>, Id> {
 		const names = (
 			Array.isArray(namesOrFirst)
 				? namesOrFirst
@@ -175,21 +179,21 @@ export class Genesis<
 	public decorate<K extends string, V>(
 		key: K,
 		value: V,
-	): Genesis<G.Combine<T, { decorations: { [P in K]: V } }>, Id> {
+	): Genesis<G.Simplify<G.Combine<T, { decorations: { [P in K]: V } }>>, Id> {
 		return this._register("decorations", { key, value });
 	}
 
 	public state<S extends Record<string, unknown>>(
 		obj: S,
-	): Genesis<G.Combine<T, { store: S }>, Id>;
+	): Genesis<G.Simplify<G.Combine<T, { store: S }>>, Id>;
 	public state<K extends string, V>(
 		key: K,
 		value: V,
-	): Genesis<G.Combine<T, { store: { [P in K]: V } }>, Id>;
+	): Genesis<G.Simplify<G.Combine<T, { store: { [P in K]: V } }>>, Id>;
 	public state<NewT extends G.Atlas>(
 		keyOrObj: string | Record<string, unknown>,
 		value?: unknown,
-	): Genesis<NewT, Id> {
+	): Genesis<G.Simplify<NewT>, Id> {
 		const payload: G.RegistrationSchema["state"] = { keyOrObj, value };
 		return this._register<"state", NewT>("state", payload);
 	}
@@ -365,9 +369,13 @@ export class Genesis<
 			if (typeof id !== "string") continue;
 			const methods = s.dispatchAtlas[id];
 			if (!methods) continue;
+
+			const methodMap = new Map<string, G.Handler>();
+			s.pipelines.set(id, methodMap);
+
 			for (const method of Object.keys(methods)) {
 				const h = methods[method];
-				if (h) s.pipelines.set(`${id}:${method}`, this._compile(id, method, h));
+				if (h) methodMap.set(method, this._compile(id, method, h));
 			}
 		}
 	}
@@ -527,9 +535,9 @@ export class Genesis<
 	public use<U extends G.Atlas>(
 		child: Genesis<U>,
 		state?: Partial<U["store"]>,
-	): Genesis<G.Combine<T, U>, Id> {
+	): Genesis<G.Simplify<G.Combine<T, U>>, Id> {
 		if (this._state.children.some((c) => c.identity === child.identity))
-			return this._evolve<G.Combine<T, U>>(this._state);
+			return this._evolve<G.Simplify<G.Combine<T, U>>>(this._state);
 
 		const s = this._state;
 		const cState = child[INTERNAL].state;
@@ -572,7 +580,7 @@ export class Genesis<
 		});
 
 		this._state.children.push(child as unknown as Genesis<G.Atlas, string>);
-		return this._evolve<G.Combine<T, U>>(this._state);
+		return this._evolve<G.Simplify<G.Combine<T, U>>>(this._state);
 	}
 
 	public with(
@@ -793,15 +801,14 @@ export class Genesis<
 		return () => this._state.eventEmitter.off(event as string, pipe);
 	}
 
-
+	// ⚡ OVERLOAD: Strict Suggestion (Direct Completion)
+	// ⚡ OVERLOAD: Dynamic Execution (Deep Mapping)
 	public request<
 		K extends
 			| Extract<keyof T["services"] | keyof T["internal"], string>
 			| (string & {}),
-		S2 = G.Discover<T, K>,
-		M extends K extends keyof (T["services"] & T["internal"])
-			? Extract<keyof S2, string> | (string & {})
-			: string = string,
+		S2 = G.Discover<T, K extends string ? K : string>,
+		M extends keyof S2 | (string & {}) = keyof S2 | (string & {}),
 		P extends unknown[] = S2 extends Record<string, G.Handler>
 			? M extends keyof S2
 				? G.StripContext<S2[M]> extends (...args: infer Args) => unknown
@@ -819,8 +826,12 @@ export class Genesis<
 				: unknown
 			: unknown,
 	>(to: K, method: M, ...args: P): R | Promise<R> {
-		const h = this._state.pipelines.get(`${to as string}:${method as string}`);
-		if (!h) throw new Error(`[Genesis] Handler for ${to as string}:${method as string} not found.`);
+		const h = this._state.pipelines.get(to as string)?.get(method as string);
+
+		if (!h)
+			throw new Error(
+				`[Genesis] Handler for ${to as string}:${method as string} not found.`,
+			);
 
 		let ctx = this._state.contextCache.get(this.identity);
 		if (!ctx) {
@@ -840,11 +851,17 @@ export class Genesis<
 			string,
 			(...args: unknown[]) => unknown | Promise<unknown>
 		>;
+		const requester = this.request.bind(this) as (
+			to: string,
+			method: string,
+			...args: unknown[]
+		) => unknown | Promise<unknown>;
+
 		return new Proxy(Object.create(null), {
 			get: (_, method: string) => {
 				let handler = cache[method];
 				if (!handler) {
-					handler = (...args: unknown[]) => this.request(to, method, ...args);
+					handler = (...args: unknown[]) => requester(to as string, method, ...args);
 					cache[method] = handler;
 				}
 				return handler;
